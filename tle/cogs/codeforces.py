@@ -164,7 +164,6 @@ class Codeforces(commands.Cog):
     @commands.command(brief='Skip challenge')
     @cf_common.user_guard(group='gitgud')
     async def nogud(self, ctx):
-        await cf_common.resolve_handles(ctx, self.converter, ('!' + str(ctx.author),))
         user_id = ctx.message.author.id
         active = cf_common.user_db.check_challenge(user_id)
         if not active:
