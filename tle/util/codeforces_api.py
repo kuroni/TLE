@@ -1,6 +1,7 @@
 import asyncio
 import logging
-from collections import namedtuple
+import time
+from collections import namedtuple, deque
 
 import aiohttp
 
@@ -167,14 +168,11 @@ class RatingChangesUnavailableError(CodeforcesApiError):
 # Codeforces API query methods
 
 _session = None
-_api_lock = None
 
 
 async def initialize():
     global _session
-    global _api_lock
     _session = aiohttp.ClientSession()
-    _api_lock = asyncio.Lock()
 
 
 def _bool_to_str(value):
@@ -183,30 +181,59 @@ def _bool_to_str(value):
     raise TypeError(f'Expected bool, got {value} of type {type(value)}')
 
 
+def cf_ratelimit(f):
+    per_second = 5
+    last = deque([0]*per_second)
+    async def wrapped(*args, **kwargs):
+        tries = 3
+        for i in range(tries):
+            now = time.time()
+
+            # Next valid slot is 1s after the `per_second`th last request
+            next_valid = max(now, 1 + last[0])
+            last.append(next_valid)
+            last.popleft()
+
+            # Delay as needed
+            delay = next_valid - now
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+            try:
+                return await f(*args, **kwargs)
+            except (ClientError, CallLimitExceededError) as e:
+                if i < tries - 1:
+                    logger.info(f'Try {i+1}/{tries} at query failed. Retrying...')
+                else:
+                    logger.info(f'Try {i+1}/{tries} at query failed. Aborting.')
+                    raise e
+    return wrapped
+
+
+@cf_ratelimit
 async def _query_api(path, params=None):
-    async with _api_lock:
-        url = API_BASE_URL + path
-        try:
-            logger.info(f'Querying CF API at {url} with {params}')
-            # Explicitly state encoding (though aiohttp accepts gzip by default)
-            headers = {'Accept-Encoding': 'gzip'}
-            async with _session.get(url, params=params, headers=headers) as resp:
-                if resp.status == 200:
-                    resp = await resp.json()
-                    return resp['result']
-                comment = f'HTTP Error {resp.status}'
-                try:
-                    respjson = await resp.json()
-                    comment += f', {respjson.get("comment")}'
-                except aiohttp.ContentTypeError:
-                    pass
-        except aiohttp.ClientError as e:
-            logger.error(f'Request to CF API encountered error: {e!r}')
-            raise ClientError from e
-        logger.warning(f'Query to CF API failed: {comment}')
-        if 'limit exceeded' in comment:
-            raise CallLimitExceededError(comment)
-        raise CodeforcesApiError(comment)
+    url = API_BASE_URL + path
+    try:
+        logger.info(f'Querying CF API at {url} with {params}')
+        # Explicitly state encoding (though aiohttp accepts gzip by default)
+        headers = {'Accept-Encoding': 'gzip'}
+        async with _session.get(url, params=params, headers=headers) as resp:
+            if resp.status == 200:
+                resp = await resp.json()
+                return resp['result']
+            comment = f'HTTP Error {resp.status}'
+            try:
+                respjson = await resp.json()
+                comment += f', {respjson.get("comment")}'
+            except aiohttp.ContentTypeError:
+                pass
+    except aiohttp.ClientError as e:
+        logger.error(f'Request to CF API encountered error: {e!r}')
+        raise ClientError from e
+    logger.warning(f'Query to CF API failed: {comment}')
+    if 'limit exceeded' in comment:
+        raise CallLimitExceededError(comment)
+    raise CodeforcesApiError(comment)
 
 
 class contest:
